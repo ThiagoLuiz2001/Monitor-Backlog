@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "Monitor de Backlog ServiceNow",
+  "version": "1.4.0",
+  "description": "Monitora os indicadores selecionados dos painéis APTIV e BRASILSEG.",
+  "minimum_chrome_version": "120",
+  "permissions": [
+    "alarms",
+    "notifications",
+    "offscreen",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://aptiv.service-now.com/*",
+    "https://brasilseg.service-now.com/*"
+  ],
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "action": {
+    "default_title": "Monitor de Backlog ServiceNow",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "128": "icon.png"
+    }
+  },
+  "icons": {
+    "128": "icon.png"
+  }
+}
