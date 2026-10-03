@@ -1,6 +1,8 @@
 const STORE_KEY = "monitorState";
 const ACTIVITY_KEY = "panelInteractionTimes";
 const ALARM_NAME = "service-now-backlog-check";
+const RECHECK_ALARM_PREFIX = "service-now-foreground-recheck-";
+const SESSION_TOKEN_KEY = "monitorBrowserSessionToken";
 const MIN_INTERVAL_MINUTES = 0.5;
 const RECENT_USE_MS = 2 * 60 * 1000;
 
@@ -11,6 +13,9 @@ const PANEL_INFO = {
 
 let creatingOffscreenDocument;
 let currentCycle;
+let sessionTokenPromise;
+let restoringMappings;
+let lastRestoreScanAt = 0;
 
 function makePanelState() {
   return {
@@ -31,6 +36,8 @@ function defaultState() {
     running: false,
     intervalMinutes: 1,
     mapping: { aptiv: null, brasilseg: null },
+    targets: { aptiv: null, brasilseg: null },
+    mappingSession: { aptiv: null, brasilseg: null },
     panels: { aptiv: makePanelState(), brasilseg: makePanelState() }
   };
 }
@@ -43,6 +50,8 @@ async function readState() {
     ...base,
     ...value,
     mapping: { ...base.mapping, ...(value.mapping || {}) },
+    targets: { ...base.targets, ...(value.targets || {}) },
+    mappingSession: { ...base.mappingSession, ...(value.mappingSession || {}) },
     panels: {
       aptiv: { ...base.panels.aptiv, ...((value.panels || {}).aptiv || {}) },
       brasilseg: { ...base.panels.brasilseg, ...((value.panels || {}).brasilseg || {}) }
@@ -57,6 +66,7 @@ async function writeState(state) {
 async function ensureAlarm(state) {
   if (!state.running) {
     await chrome.alarms.clear(ALARM_NAME);
+    await Promise.all(Object.keys(PANEL_INFO).map((operation) => chrome.alarms.clear(`${RECHECK_ALARM_PREFIX}${operation}`)));
     return;
   }
   const interval = Math.max(MIN_INTERVAL_MINUTES, Number(state.intervalMinutes) || 1);
@@ -66,36 +76,242 @@ async function ensureAlarm(state) {
   }
 }
 
+async function getBrowserSessionToken() {
+  if (!sessionTokenPromise) {
+    sessionTokenPromise = (async () => {
+      const stored = await chrome.storage.session.get(SESSION_TOKEN_KEY);
+      let token = stored[SESSION_TOKEN_KEY];
+      if (!token) {
+        token = crypto.randomUUID();
+        await chrome.storage.session.set({ [SESSION_TOKEN_KEY]: token });
+      }
+      return token;
+    })().catch((error) => {
+      sessionTokenPromise = null;
+      throw error;
+    });
+  }
+  return sessionTokenPromise;
+}
+
+function tabIdentity(tab) {
+  try {
+    const url = new URL(tab.url || tab.pendingUrl || "");
+    return { host: url.hostname, pathname: url.pathname, title: String(tab.title || "").replace(/\s+/g, " ").trim() };
+  } catch {
+    return null;
+  }
+}
+
+function normalizeTitle(title) {
+  return String(title || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function isExpectedPanelTitle(operation, title) {
+  const normalized = normalizeTitle(title);
+  return operation === "aptiv"
+    ? normalized.includes("capgemini aptiv sd dashboard")
+    : normalized.includes("backlog service desk - copia");
+}
+
+function matchSavedTarget(operation, target, tabs) {
+  if (!target?.host || !target?.pathname) return { tab: null, reason: "missing-target" };
+  const candidates = tabs.filter((tab) => {
+    const identity = tabIdentity(tab);
+    return identity?.host === target.host && identity.host === PANEL_INFO[operation].host;
+  });
+  const exact = candidates.filter((tab) => {
+    const identity = tabIdentity(tab);
+    return identity.pathname === target.pathname && normalizeTitle(identity.title) === normalizeTitle(target.title);
+  });
+  if (exact.length === 1) return { tab: exact[0], reason: "matched" };
+  if (exact.length > 1) return { tab: null, reason: "ambiguous" };
+  const pathMatches = candidates.filter((tab) => tabIdentity(tab)?.pathname === target.pathname);
+  if (!target.title && pathMatches.length === 1 && pathMatches[0].status !== "loading") return { tab: pathMatches[0], reason: "matched-path" };
+
+  const titleMatches = candidates.filter((tab) => normalizeTitle(tabIdentity(tab)?.title) === normalizeTitle(target.title));
+  if (target.title && titleMatches.length === 1) return { tab: titleMatches[0], reason: "matched-title" };
+  if (candidates.some((tab) => tab.status === "loading")) return { tab: null, reason: "loading" };
+  if (titleMatches.length > 1 || candidates.filter((tab) => tabIdentity(tab)?.pathname === target.pathname).length > 1) {
+    return { tab: null, reason: "ambiguous" };
+  }
+  return { tab: null, reason: candidates.some((tab) => tab.status === "loading") ? "loading" : "not-found" };
+}
+
+async function restoreSavedMappings(force = false) {
+  if (restoringMappings) return restoringMappings;
+  if (!force && Date.now() - lastRestoreScanAt < 5000) return readState();
+  restoringMappings = performMappingRestore().finally(() => { restoringMappings = null; });
+  return restoringMappings;
+}
+
+async function performMappingRestore() {
+  const [state, sessionToken] = await Promise.all([readState(), getBrowserSessionToken()]);
+  const patterns = Object.values(PANEL_INFO).map(({ host }) => `https://${host}/*`);
+  const tabs = await chrome.tabs.query({ url: patterns });
+  let changed = false;
+  const restoredOperations = [];
+
+  for (const operation of Object.keys(PANEL_INFO)) {
+    const oldTabId = state.mapping[operation];
+    const oldTarget = state.targets[operation];
+    if (state.mappingSession[operation] === sessionToken && Number.isInteger(oldTabId)) {
+      try {
+        const currentTab = await chrome.tabs.get(oldTabId);
+        if (tabIdentity(currentTab)?.host === PANEL_INFO[operation].host) {
+          if (!oldTarget) {
+            state.targets[operation] = tabIdentity(currentTab);
+            state.panels[operation].status = "Aba restaurada";
+            state.panels[operation].detail = "A identidade da aba foi salva; aguardando leitura do painel.";
+            state.panels[operation].checkedAt = null;
+            changed = true;
+            restoredOperations.push(operation);
+          }
+          continue;
+        }
+      } catch {
+        // The tab may have been closed; attempt to find its saved identity below.
+      }
+    }
+
+    if (!oldTarget && Number.isInteger(oldTabId)) {
+      const expectedLegacyTabs = tabs.filter((tab) => tabIdentity(tab)?.host === PANEL_INFO[operation].host && isExpectedPanelTitle(operation, tab.title));
+      const legacyTab = expectedLegacyTabs.length === 1 ? expectedLegacyTabs[0] : null;
+      if (legacyTab) {
+        state.targets[operation] = tabIdentity(legacyTab);
+        state.mapping[operation] = legacyTab.id;
+        state.mappingSession[operation] = sessionToken;
+        state.panels[operation].status = "Aba restaurada";
+        state.panels[operation].detail = "A seleção anterior foi recuperada; aguardando leitura do painel.";
+        state.panels[operation].checkedAt = null;
+        changed = true;
+        restoredOperations.push(operation);
+        continue;
+      }
+      if (tabs.some((tab) => tabIdentity(tab)?.host === PANEL_INFO[operation].host && tab.status === "loading")) continue;
+      if (expectedLegacyTabs.length > 1) {
+        state.mapping[operation] = null;
+        state.mappingSession[operation] = null;
+        state.panels[operation].status = "Escolha de aba necessária";
+        state.panels[operation].detail = "Há mais de uma aba que pode corresponder ao painel antigo. Escolha a correta no popup.";
+        state.panels[operation].checkedAt = null;
+        changed = true;
+        continue;
+      }
+    }
+
+    const target = state.targets[operation];
+    if (!target) {
+      if (Number.isInteger(state.mapping[operation])) {
+        state.mapping[operation] = null;
+        state.mappingSession[operation] = null;
+        state.panels[operation].status = "Aba não disponível";
+        state.panels[operation].detail = "Não foi possível identificar a seleção antiga. Escolha a aba do painel novamente.";
+        state.panels[operation].checkedAt = null;
+        changed = true;
+      }
+      continue;
+    }
+
+    const match = matchSavedTarget(operation, target, tabs);
+    if (match.tab) {
+      const reassigned = state.mapping[operation] !== match.tab.id || state.mappingSession[operation] !== sessionToken;
+      state.mapping[operation] = match.tab.id;
+      state.mappingSession[operation] = sessionToken;
+      if (reassigned) {
+        state.panels[operation].status = "Aba restaurada";
+        state.panels[operation].detail = "A aba salva foi associada novamente; aguardando leitura do painel.";
+        state.panels[operation].checkedAt = null;
+        changed = true;
+        restoredOperations.push(operation);
+      }
+    } else {
+      if (state.mapping[operation] !== null || state.mappingSession[operation] !== null) {
+        state.mapping[operation] = null;
+        state.mappingSession[operation] = null;
+        state.panels[operation].checkedAt = null;
+        changed = true;
+      }
+      const label = target.title || PANEL_INFO[operation].label;
+      const status = match.reason === "ambiguous"
+        ? "Escolha de aba necessária"
+        : match.reason === "loading" ? "Aba restaurando" : "Aba salva não aberta";
+      const detail = match.reason === "ambiguous"
+        ? `Mais de uma aba corresponde a “${label}”. Escolha a correta no popup.`
+        : match.reason === "loading"
+          ? `A aba salva “${label}” ainda está carregando; a extensão tentará reassociá-la quando terminar.`
+          : `A aba salva “${label}” ainda não foi encontrada. Quando o Chrome a abrir, a extensão tentará associá-la; se necessário, selecione-a no popup.`;
+      if (state.panels[operation].status !== status || state.panels[operation].detail !== detail) changed = true;
+      state.panels[operation].status = status;
+      state.panels[operation].detail = detail;
+    }
+  }
+
+  if (changed) await writeState(state);
+  if (state.running) {
+    await Promise.all([...new Set(restoredOperations)].map((operation) =>
+      chrome.alarms.create(`${RECHECK_ALARM_PREFIX}${operation}`, { delayInMinutes: MIN_INTERVAL_MINUTES })
+    ));
+  }
+  lastRestoreScanAt = Date.now();
+  return state;
+}
+
 chrome.runtime.onInstalled.addListener(async () => {
   const state = await readState();
   await writeState(state);
   await ensureAlarm(state);
+  await restoreSavedMappings(true);
 });
 
 chrome.runtime.onStartup.addListener(async () => {
   const state = await readState();
   await ensureAlarm(state);
+  await restoreSavedMappings(true);
 });
 
 void (async () => {
   const state = await readState();
   await ensureAlarm(state);
+  await restoreSavedMappings(true);
 })();
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === ALARM_NAME) runCycle();
+  else if (alarm.name.startsWith(RECHECK_ALARM_PREFIX)) {
+    const operation = alarm.name.slice(RECHECK_ALARM_PREFIX.length);
+    if (operation in PANEL_INFO) runCycle(operation);
+  }
 });
 
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
-  const state = await readState();
+  const sessionToken = await getBrowserSessionToken();
+  let state = await readState();
+  const needsRestore = Object.keys(PANEL_INFO).some((operation) =>
+    state.targets[operation] && (state.mappingSession[operation] !== sessionToken || !Number.isInteger(state.mapping[operation]))
+  );
+  if (needsRestore) {
+    await restoreSavedMappings(true);
+    state = await readState();
+  }
   let changed = false;
   for (const operation of Object.keys(PANEL_INFO)) {
-    if (state.mapping[operation] === tabId) {
+    if (state.mapping[operation] === tabId && state.mappingSession[operation] === sessionToken) {
       state.panels[operation].lastSelectedAt = Date.now();
       changed = true;
+      if (state.running) {
+        await chrome.alarms.create(`${RECHECK_ALARM_PREFIX}${operation}`, { delayInMinutes: MIN_INTERVAL_MINUTES });
+      }
     }
   }
   if (changed) await writeState(state);
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.url || changeInfo.title || changeInfo.status === "complete") {
+    const host = tabIdentity(tab)?.host;
+    if (Object.values(PANEL_INFO).some((panel) => panel.host === host)) void restoreSavedMappings(true);
+  }
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -110,7 +326,8 @@ async function handleMessage(message, sender) {
   const state = await readState();
   switch (message.type) {
     case "GET_STATE":
-      return { state };
+      await restoreSavedMappings();
+      return { state: await readState() };
     case "PANEL_INTERACTION": {
       const tabId = sender?.tab?.id;
       const senderHost = (() => {
@@ -131,6 +348,14 @@ async function handleMessage(message, sender) {
       if (!(operation in PANEL_INFO)) throw new Error("Operação inválida.");
       const tabId = message.tabId == null ? null : Number(message.tabId);
       if (tabId !== null && !Number.isInteger(tabId)) throw new Error("Aba inválida.");
+      const sessionToken = tabId === null ? null : await getBrowserSessionToken();
+      let target = null;
+      if (tabId !== null) {
+        let selectedTab;
+        try { selectedTab = await chrome.tabs.get(tabId); } catch { throw new Error("A aba selecionada não está mais disponível."); }
+        target = tabIdentity(selectedTab);
+        if (target?.host !== PANEL_INFO[operation].host) throw new Error("Selecione uma aba do domínio correto para este painel.");
+      }
       if (state.mapping[operation] !== tabId) {
         state.panels[operation] = makePanelState();
         chrome.notifications.clear(`${operation}-backlog`).catch(() => {});
@@ -140,6 +365,8 @@ async function handleMessage(message, sender) {
         await chrome.storage.local.set({ [ACTIVITY_KEY]: times });
       }
       state.mapping[operation] = tabId;
+      state.targets[operation] = tabId === null ? null : target;
+      state.mappingSession[operation] = sessionToken;
       state.panels[operation].lastSelectedAt = tabId === null ? null : Date.now();
       state.panels[operation].detail = tabId === null
         ? "Selecione a aba correta deste painel no popup."
@@ -180,9 +407,9 @@ async function handleMessage(message, sender) {
   }
 }
 
-async function runCycle() {
+async function runCycle(onlyOperation = null) {
   if (currentCycle) return currentCycle;
-  currentCycle = performCycle();
+  currentCycle = performCycle(onlyOperation);
   try {
     await currentCycle;
   } finally {
@@ -190,16 +417,18 @@ async function runCycle() {
   }
 }
 
-async function performCycle() {
+async function performCycle(onlyOperation = null) {
+  await restoreSavedMappings();
   const state = await readState();
   if (!state.running) return;
   const checkedMapping = { ...state.mapping };
+  const operations = onlyOperation && onlyOperation in PANEL_INFO ? [onlyOperation] : ["aptiv", "brasilseg"];
 
-  for (const operation of ["aptiv", "brasilseg"]) {
+  for (const operation of operations) {
     await checkOperation(operation, state);
   }
   const latestState = await readState();
-  for (const operation of ["aptiv", "brasilseg"]) {
+  for (const operation of operations) {
     if (latestState.mapping[operation] === checkedMapping[operation]) {
       const latestPanel = latestState.panels[operation];
       latestState.panels[operation] = {
@@ -218,6 +447,13 @@ async function checkOperation(operation, state) {
   const tabId = state.mapping[operation];
   panel.checkedAt = now;
   panel.freshness = "";
+
+  // Tab IDs can be reused after Chrome restarts. Never inspect one until its
+  // saved identity has been re-associated in the current browser session.
+  if (Number.isInteger(tabId) && state.mappingSession[operation] !== await getBrowserSessionToken()) {
+    setPanelResult(panel, "unknown", "Aba restaurando", "A seleção salva ainda está sendo associada à aba correta. O monitor tentará novamente.");
+    return;
+  }
 
   if (!Number.isInteger(tabId)) {
     setPanelResult(panel, "unknown", "Aba não disponível", "Escolha uma aba aberta deste painel no popup.");
@@ -288,17 +524,29 @@ async function checkOperation(operation, state) {
   }
   const storedActivity = await chrome.storage.local.get(ACTIVITY_KEY);
   const lastPersistedInteraction = Number(storedActivity[ACTIVITY_KEY]?.[operation]) || 0;
+  const lastInteraction = Math.max(lastPersistedInteraction, 0, ...readings.map((reading) => Number(reading.lastInteraction) || 0));
   if (readings.every((reading) => reading.noReadableContent)) {
-    setPanelResult(panel, "unknown", "Página sem conteúdo legível", "A aba está em branco ou não expôs texto. O monitor tentará uma recuperação em segundo plano após o período seguro; se persistir, confira a própria aba do ServiceNow.");
+    const detail = operation === "brasilseg"
+      ? "A aba não expôs texto legível. Isso não será interpretado como ausência de chamados."
+      : "A aba está em branco ou não expôs texto. O monitor tentará uma recuperação em segundo plano após o período seguro; se persistir, confira a própria aba do ServiceNow.";
+    setPanelResult(panel, "unknown", "Página sem conteúdo legível", detail);
     if (!Number.isFinite(panel.lastSelectedAt) && !Number.isFinite(tab.lastAccessed)) panel.lastSelectedAt = now;
-    await maybeRefreshAfterIdle(tab, panel, now, false, lastPersistedInteraction, panel.lastSelectedAt, true, state.intervalMinutes);
+    if (operation === "brasilseg") {
+      await maybeClickBrasilsegRefresh(tab, panel, now, lastInteraction, panel.lastSelectedAt, state.intervalMinutes);
+    } else {
+      await maybeRefreshAfterIdle(tab, panel, now, false, lastInteraction, panel.lastSelectedAt, true, state.intervalMinutes);
+    }
     return;
   }
 
   const result = operation === "aptiv" ? combineAptiv(readings) : combineBrasilseg(readings);
   if (!result) {
     setPanelResult(panel, "unknown", "Falha de leitura", "O indicador esperado não foi encontrado no conteúdo acessível da página.");
-    panel.freshness = "A recarga automática foi suspensa porque o indicador não pôde ser lido com confiança.";
+    if (operation === "brasilseg") {
+      await maybeClickBrasilsegRefresh(tab, panel, now, lastInteraction, panel.lastSelectedAt, state.intervalMinutes);
+    } else {
+      panel.freshness = "A recarga automática foi suspensa porque o indicador não pôde ser lido com confiança.";
+    }
     return;
   }
 
@@ -322,13 +570,20 @@ async function checkOperation(operation, state) {
   }
 
   if (result.kind === "unknown") {
-    panel.freshness = "A recarga automática foi suspensa porque a leitura ficou inconclusiva.";
+    if (operation === "brasilseg") {
+      await maybeClickBrasilsegRefresh(tab, panel, now, lastInteraction, panel.lastSelectedAt, state.intervalMinutes);
+    } else {
+      panel.freshness = "A recarga automática foi suspensa porque a leitura ficou inconclusiva.";
+    }
   } else {
-    const lastInteraction = Math.max(lastPersistedInteraction, 0, ...readings.map((reading) => Number(reading.lastInteraction) || 0));
     if (!Number.isFinite(panel.lastSelectedAt) && !Number.isFinite(tab.lastAccessed)) {
       panel.lastSelectedAt = now;
     }
-    await maybeRefreshAfterIdle(tab, panel, now, contentChanged, lastInteraction, panel.lastSelectedAt);
+    if (operation === "brasilseg") {
+      await maybeClickBrasilsegRefresh(tab, panel, now, lastInteraction, panel.lastSelectedAt, state.intervalMinutes);
+    } else {
+      await maybeRefreshAfterIdle(tab, panel, now, contentChanged, lastInteraction, panel.lastSelectedAt);
+    }
   }
 }
 
@@ -376,6 +631,124 @@ async function maybeRefreshAfterIdle(tab, panel, now, contentChanged, lastIntera
   }
 }
 
+async function maybeClickBrasilsegRefresh(tab, panel, now, lastInteraction, lastSelectedAt, intervalMinutes = 1) {
+  if (tab.status === "loading") {
+    panel.freshness = "Clique no botão do ServiceNow adiado: a página ainda está carregando.";
+    return;
+  }
+  const selectedAt = Math.max(Number(lastSelectedAt) || 0, Number(tab.lastAccessed) || 0);
+  const activityAt = Number(lastInteraction) || 0;
+  const recentlySelected = selectedAt > 0 && now - selectedAt < RECENT_USE_MS;
+  const recentlyInteracted = activityAt > 0 && now - activityAt < RECENT_USE_MS;
+  if (recentlySelected || recentlyInteracted) {
+    const reason = recentlyInteracted
+      ? "houve interação com o painel nos últimos dois minutos"
+      : "a aba foi selecionada há menos de dois minutos";
+    panel.freshness = `Clique no botão do ServiceNow adiado porque ${reason}; nova tentativa no próximo ciclo.`;
+    return;
+  }
+
+  const minClickIntervalMs = Math.max(MIN_INTERVAL_MINUTES * 60 * 1000, (Number(intervalMinutes) || 1) * 60 * 1000);
+  const elapsedSinceRefresh = now - (Number(panel.lastRefreshAt) || 0);
+  if (panel.lastRefreshAt && elapsedSinceRefresh < minClickIntervalMs) {
+    const waitSeconds = Math.max(1, Math.ceil((minClickIntervalMs - elapsedSinceRefresh) / 1000));
+    panel.freshness = `O botão já foi acionado neste intervalo; a próxima tentativa será em cerca de ${waitSeconds} s.`;
+    return;
+  }
+
+  try {
+    const frames = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: clickBrasilsegRefreshButton
+    });
+    const result = frames?.[0]?.result;
+    if (result?.status === "clicked") {
+      panel.lastRefreshAt = now;
+      panel.freshness = "Botão de atualização do painel acionado em segundo plano; a próxima verificação lerá os dados atualizados.";
+    } else if (result?.status === "ambiguous") {
+      panel.freshness = "Encontrei mais de um botão de atualização possível no painel; não cliquei para evitar uma ação errada.";
+    } else if (result?.status === "not-found") {
+      panel.freshness = "Não encontrei o botão de atualização do painel no DOM; não cliquei e não recarreguei a página.";
+    } else if (result?.status === "disabled") {
+      panel.freshness = "O botão de atualização do ServiceNow está desabilitado; tentarei novamente no próximo ciclo.";
+    } else if (result?.status === "not-dashboard") {
+      panel.freshness = "Não confirmei as seções Reação e Resolução nesta aba; nenhum botão foi acionado.";
+    } else if (result?.status === "loading") {
+      panel.freshness = "O documento ainda está carregando; tentarei o botão do ServiceNow no próximo ciclo.";
+    } else {
+      panel.freshness = "Não foi possível confirmar o botão de atualização do ServiceNow; a página não foi recarregada.";
+    }
+  } catch (error) {
+    panel.freshness = `Não consegui acionar o botão do ServiceNow em segundo plano: ${shortError(error)}. A página não foi recarregada.`;
+  }
+}
+
+function clickBrasilsegRefreshButton() {
+  if (location.hostname.toLowerCase() !== "brasilseg.service-now.com") return { status: "not-dashboard" };
+  if (document.readyState !== "complete") return { status: "loading" };
+
+  const normalize = (value) => String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+  const elements = [];
+  const textParts = [];
+  const visited = new Set();
+  function walk(node) {
+    if (!node || visited.has(node)) return;
+    visited.add(node);
+    if (node.nodeType === 3) {
+      if (node.nodeValue?.trim()) textParts.push(node.nodeValue);
+      return;
+    }
+    if (node.nodeType === 1) {
+      elements.push(node);
+      if (node.localName === "slot") {
+        const assigned = node.assignedNodes({ flatten: true });
+        if (assigned.length) {
+          for (const child of assigned) walk(child);
+          return;
+        }
+      }
+      if (node.shadowRoot) {
+        for (const child of node.shadowRoot.childNodes) walk(child);
+      }
+    }
+    for (const child of node.childNodes || []) walk(child);
+  }
+  walk(document.body);
+
+  const pageText = normalize(textParts.join(" "));
+  if (!pageText.includes("reacao") || !pageText.includes("resolucao")) return { status: "not-dashboard" };
+
+  const controls = elements.filter((element) => {
+    if (!element.matches?.("button, [role='button'], a[href], [tabindex]:not([tabindex='-1'])")) return false;
+    const style = getComputedStyle(element);
+    if (element.hidden || style.display === "none" || style.visibility === "hidden" || style.opacity === "0" || !element.getClientRects().length) return false;
+    const names = [
+      element.getAttribute("aria-label"),
+      element.getAttribute("title"),
+      element.getAttribute("data-tooltip"),
+      element.getAttribute("data-original-title"),
+      element.getAttribute("data-action"),
+      element.getAttribute("name"),
+      element.id,
+      element.innerText,
+      element.textContent
+    ].map(normalize).filter(Boolean).join(" ");
+    return /\b(refresh|atualizar|atualizacao|recarregar|reload|update)\b/.test(names);
+  });
+  const uniqueControls = controls.filter((element, index) => controls.indexOf(element) === index);
+  if (!uniqueControls.length) return { status: "not-found" };
+  if (uniqueControls.length !== 1) return { status: "ambiguous" };
+  const button = uniqueControls[0];
+  if (button.disabled || button.getAttribute("aria-disabled") === "true") return { status: "disabled" };
+  button.click();
+  return { status: "clicked" };
+}
+
 function combineAptiv(readings) {
   const matches = readings.filter((reading) => Number.isInteger(reading.aptivValue));
   if (!matches.length) return null;
@@ -392,12 +765,19 @@ function combineBrasilseg(readings) {
     const matching = readings.flatMap((reading) => reading.sections || []).filter((section) => section && section.name === name);
     const kinds = [...new Set(matching.map((section) => section.kind))];
     if (kinds.includes("backlog")) return { name, kind: "backlog" };
+    if (kinds.includes("loading")) return { name, kind: "loading" };
     if (kinds.includes("empty")) return { name, kind: "empty" };
     return { name, kind: "unknown" };
   });
   const positive = sections.filter((section) => section.kind === "backlog").map((section) => section.name);
   if (positive.length) {
     return { kind: "backlog", status: "Backlog detectado", detail: `${positive.join(" e ")} exibe dados`, sections };
+  }
+  const loading = sections.filter((section) => section.kind === "loading").map((section) => section.name);
+  if (loading.length) {
+    const unknown = sections.filter((section) => section.kind === "unknown").map((section) => section.name);
+    const suffix = unknown.length ? ` ${unknown.join(" e ")} ainda não pôde ser lida.` : "";
+    return { kind: "unknown", status: "Dashboard carregando", detail: `${loading.join(" e ")} ainda mostra indicador de carregamento.${suffix} Será verificado novamente.`, sections };
   }
   if (sections.every((section) => section.kind === "empty")) {
     return { kind: "empty", status: "Sem backlog", detail: "Reação e Resolução sem linhas ou chamados.", sections };
@@ -585,11 +965,14 @@ function collectPanelFrame(operation) {
       for (let depth = 0; depth < 12 && container; depth += 1, container = parentAcrossShadow(container)) {
         const sectionText = textAfterAnchor(container, anchor, opposite);
         if (!sectionText) continue;
+        const containerText = textOf(container);
+        if (!containerText.includes(opposite) && hasLoadingIndicator(container)) {
+          return { name, kind: "loading" };
+        }
         if (/\b(?:inc|req|ritm|sctask|task)\s*\d{5,}\b/i.test(sectionText)) {
           return { name, kind: "backlog" };
         }
         if (hasDataRows(container, sectionText)) return { name, kind: "backlog" };
-        const containerText = textOf(container);
         if (!containerText.includes(opposite) && hasChartData(container)) return { name, kind: "backlog" };
         if (noData.some((phrase) => sectionText.includes(phrase))) return { name, kind: "empty" };
       }
@@ -657,6 +1040,22 @@ function collectPanelFrame(operation) {
         parent = parentAcrossShadow(parent);
       }
       return false;
+    });
+  }
+
+  function hasLoadingIndicator(container) {
+    const elements = [container, ...deepElements(container)];
+    return elements.some((element) => {
+      if (!isVisible(element)) return false;
+      const role = String(element.getAttribute?.("role") || "").toLowerCase();
+      const ariaBusy = String(element.getAttribute?.("aria-busy") || "").toLowerCase() === "true";
+      const label = `${element.getAttribute?.("aria-label") || ""} ${element.getAttribute?.("title") || ""}`.toLowerCase();
+      const classes = typeof element.className === "string"
+        ? element.className.toLowerCase()
+        : String(element.className?.baseVal || "").toLowerCase();
+      const customLoader = /(?:^|[-_])(loader|spinner|loading|progress)(?:$|[-_])/.test(element.localName || "");
+      const namedLoader = /(?:spinner|loading|loader|carregando|progress)/i.test(`${classes} ${label}`);
+      return role === "progressbar" || ariaBusy || customLoader || namedLoader;
     });
   }
 
