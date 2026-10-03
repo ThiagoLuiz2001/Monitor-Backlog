@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Monitor de Backlog ServiceNow",
-  "version": "1.4.0",
+  "version": "1.6.1",
   "description": "Monitora os indicadores selecionados dos painéis APTIV e BRASILSEG.",
   "minimum_chrome_version": "120",
   "permissions": [
