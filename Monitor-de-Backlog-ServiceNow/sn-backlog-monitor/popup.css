@@ -117,6 +117,7 @@ button:focus-visible, select:focus-visible, input:focus-visible {
 .operation-heading { justify-content: flex-start; margin-bottom: 2px; }
 .operation-dot { width: 9px; height: 9px; border-radius: 50%; }
 .aptiv-dot { background: #e66a2c; }
+.poland-dot { background: #dc3145; }
 .brasilseg-dot { background: #23799c; }
 .operation select {
   width: 100%;

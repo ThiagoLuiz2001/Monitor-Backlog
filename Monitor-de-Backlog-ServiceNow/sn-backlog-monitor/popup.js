@@ -2,8 +2,8 @@ const HOST_PATTERNS = [
   "https://aptiv.service-now.com/*",
   "https://brasilseg.service-now.com/*"
 ];
-const OPERATION_LABELS = { aptiv: "APTIV", brasilseg: "BRASILSEG" };
-const tabCache = { aptiv: [], brasilseg: [] };
+const OPERATION_LABELS = { aptiv: "APTIV", aptivPoland: "APTIV Polônia", brasilseg: "BRASILSEG" };
+const tabCache = { aptiv: [], aptivPoland: [], brasilseg: [] };
 let loadingTabList = false;
 let lastTabListLoad = 0;
 
@@ -23,7 +23,10 @@ document.addEventListener("DOMContentLoaded", async () => {
         type: "SET_MAPPING",
         operation,
         tabId: selected ? Number(selected) : null
-      }).then(() => renderState());
+      }).then((response) => {
+        setFeedback(response.ok ? "" : response.error || "Não foi possível selecionar essa aba.");
+        return renderState();
+      });
     });
   }
 
@@ -39,6 +42,7 @@ async function loadTabs() {
   try {
     const tabs = await chrome.tabs.query({ url: HOST_PATTERNS });
     tabCache.aptiv = tabs.filter((tab) => hostname(tab.url) === "aptiv.service-now.com");
+    tabCache.aptivPoland = [...tabCache.aptiv];
     tabCache.brasilseg = tabs.filter((tab) => hostname(tab.url) === "brasilseg.service-now.com");
     const response = await sendMessage({ type: "GET_STATE" });
     if (!response.ok || !response.state) throw new Error(response.error || "Não foi possível ler as configurações salvas.");

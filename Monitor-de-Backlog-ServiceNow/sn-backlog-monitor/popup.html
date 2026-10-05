@@ -12,7 +12,7 @@
         <div class="brand-mark" aria-hidden="true">B</div>
         <div>
           <h1>Monitor de Backlog</h1>
-          <p>ServiceNow · APTIV e BRASILSEG</p>
+          <p>ServiceNow · APTIV, Polônia e BRASILSEG</p>
         </div>
       </header>
 
@@ -27,7 +27,7 @@
           <span>minutos</span>
           <button id="save-interval" class="secondary-button" type="button">Aplicar</button>
         </div>
-        <p class="hint">Mínimo: 0,5 minuto (30 segundos). Após uma leitura confiável, a aba pode ser atualizada em segundo plano quando não houver interação observada por 2 minutos, mesmo que continue aberta. O Chrome pode atrasar os alarmes.</p>
+        <p class="hint">Mínimo: 0,5 minuto (30 segundos). As verificações e atualizações seguem este intervalo. APTIV e Polônia recarregam a página; BRASILSEG usa o botão interno. Ações podem esperar se a aba foi usada há menos de 2 minutos. O Chrome pode atrasar os alarmes.</p>
         <div class="button-row">
           <button id="start" class="primary-button" type="button">Iniciar</button>
           <button id="stop" class="secondary-button" type="button">Parar</button>
@@ -51,6 +51,23 @@
         </div>
         <p id="aptiv-detail" class="detail">Selecione a aba que contém o painel APTIV.</p>
         <p id="aptiv-freshness" class="freshness"></p>
+      </section>
+
+      <section class="operation" aria-labelledby="aptivPoland-title">
+        <div class="operation-heading">
+          <span class="operation-dot poland-dot" aria-hidden="true"></span>
+          <h2 id="aptivPoland-title">APTIV Polônia · Brasil/Portugal</h2>
+        </div>
+        <label for="aptivPoland-tab">Aba da lista de chamados</label>
+        <select id="aptivPoland-tab">
+          <option value="">Carregando abas…</option>
+        </select>
+        <div class="result-line">
+          <strong id="aptivPoland-state">Aguardando configuração</strong>
+          <span id="aptivPoland-time">Sem verificação</span>
+        </div>
+        <p id="aptivPoland-detail" class="detail">Selecione a aba “Backlog APTIV Polônia”.</p>
+        <p id="aptivPoland-freshness" class="freshness"></p>
       </section>
 
       <section class="operation" aria-labelledby="brasilseg-title">
