@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Monitor de Backlog ServiceNow",
-  "version": "1.6.1",
-  "description": "Monitora os indicadores selecionados dos painéis APTIV e BRASILSEG.",
+  "version": "2.5.0",
+  "description": "Monitora indicadores dos painéis APTIV, BRASILSEG e APTIV Polônia.",
   "minimum_chrome_version": "120",
   "permissions": [
     "alarms",
@@ -22,7 +22,8 @@
     "default_title": "Monitor de Backlog ServiceNow",
     "default_popup": "popup.html",
     "default_icon": {
-      "128": "icon.png"
+      "16": "icons/status/idle16.png",
+      "32": "icons/status/idle32.png"
     }
   },
   "icons": {

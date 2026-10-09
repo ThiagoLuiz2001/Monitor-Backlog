@@ -1,3 +1,5 @@
+importScripts("monitor-rules.js");
+
 const STORE_KEY = "monitorState";
 const ACTIVITY_KEY = "panelInteractionTimes";
 const ALARM_NAME = "service-now-backlog-check";
@@ -8,14 +10,31 @@ const RECENT_USE_MS = 2 * 60 * 1000;
 
 const PANEL_INFO = {
   aptiv: { label: "APTIV", host: "aptiv.service-now.com" },
+  aptivPoland: { label: "APTIV Polônia", host: "aptiv.service-now.com" },
   brasilseg: { label: "BRASILSEG", host: "brasilseg.service-now.com" }
 };
 
 let creatingOffscreenDocument;
 let currentCycle;
+let currentCycleVersion = 0;
+let cycleVersion = 0;
 let sessionTokenPromise;
 let restoringMappings;
 let lastRestoreScanAt = 0;
+
+const DETECT_DOM_CHANGES_KEY = "monitorDomChangeLog";
+const ACTION_ICONS = {
+  idle: { 16: "icons/status/idle16.png", 32: "icons/status/idle32.png" },
+  error: { 16: "icons/status/error16.png", 32: "icons/status/error32.png" },
+  inconclusive: { 16: "icons/status/inconclusive16.png", 32: "icons/status/inconclusive32.png" },
+  success: { 16: "icons/status/success16.png", 32: "icons/status/success32.png" }
+};
+const ACTION_TITLES = {
+  idle: "Em espera",
+  error: "Erro em pelo menos um backlog",
+  inconclusive: "Há verificações inconclusivas",
+  success: "Três backlogs verificados com sucesso"
+};
 
 function makePanelState() {
   return {
@@ -35,10 +54,10 @@ function defaultState() {
   return {
     running: false,
     intervalMinutes: 1,
-    mapping: { aptiv: null, brasilseg: null },
-    targets: { aptiv: null, brasilseg: null },
-    mappingSession: { aptiv: null, brasilseg: null },
-    panels: { aptiv: makePanelState(), brasilseg: makePanelState() }
+    mapping: { aptiv: null, aptivPoland: null, brasilseg: null },
+    targets: { aptiv: null, aptivPoland: null, brasilseg: null },
+    mappingSession: { aptiv: null, aptivPoland: null, brasilseg: null },
+    panels: { aptiv: makePanelState(), aptivPoland: makePanelState(), brasilseg: makePanelState() }
   };
 }
 
@@ -54,6 +73,7 @@ async function readState() {
     mappingSession: { ...base.mappingSession, ...(value.mappingSession || {}) },
     panels: {
       aptiv: { ...base.panels.aptiv, ...((value.panels || {}).aptiv || {}) },
+      aptivPoland: { ...base.panels.aptivPoland, ...((value.panels || {}).aptivPoland || {}) },
       brasilseg: { ...base.panels.brasilseg, ...((value.panels || {}).brasilseg || {}) }
     }
   };
@@ -61,6 +81,19 @@ async function readState() {
 
 async function writeState(state) {
   await chrome.storage.local.set({ [STORE_KEY]: state });
+  await updateActionIcon(state);
+}
+
+async function updateActionIcon(state) {
+  const status = MonitorRules.deriveOverallStatus(state);
+  try {
+    await Promise.all([
+      chrome.action.setIcon({ path: ACTION_ICONS[status] }),
+      chrome.action.setTitle({ title: `Monitor de Backlog ServiceNow · ${ACTION_TITLES[status]}` })
+    ]);
+  } catch {
+    // The manifest's default icon remains available if Chrome rejects an update.
+  }
 }
 
 async function ensureAlarm(state) {
@@ -109,9 +142,9 @@ function normalizeTitle(title) {
 
 function isExpectedPanelTitle(operation, title) {
   const normalized = normalizeTitle(title);
-  return operation === "aptiv"
-    ? normalized.includes("capgemini aptiv sd dashboard")
-    : normalized.includes("backlog service desk - copia");
+  if (operation === "aptiv") return normalized.includes("capgemini aptiv sd dashboard");
+  if (operation === "aptivPoland") return normalized.includes("backlog aptiv polonia");
+  return normalized.includes("backlog service desk - copia");
 }
 
 function matchSavedTarget(operation, target, tabs) {
@@ -147,7 +180,7 @@ async function restoreSavedMappings(force = false) {
 
 async function performMappingRestore() {
   const [state, sessionToken] = await Promise.all([readState(), getBrowserSessionToken()]);
-  const patterns = Object.values(PANEL_INFO).map(({ host }) => `https://${host}/*`);
+  const patterns = [...new Set(Object.values(PANEL_INFO).map(({ host }) => `https://${host}/*`))];
   const tabs = await chrome.tabs.query({ url: patterns });
   let changed = false;
   const restoredOperations = [];
@@ -241,9 +274,12 @@ async function performMappingRestore() {
         : match.reason === "loading"
           ? `A aba salva “${label}” ainda está carregando; a extensão tentará reassociá-la quando terminar.`
           : `A aba salva “${label}” ainda não foi encontrada. Quando o Chrome a abrir, a extensão tentará associá-la; se necessário, selecione-a no popup.`;
-      if (state.panels[operation].status !== status || state.panels[operation].detail !== detail) changed = true;
-      state.panels[operation].status = status;
-      state.panels[operation].detail = detail;
+      const panel = state.panels[operation];
+      if (panel.status !== status || panel.detail !== detail || panel.kind !== "unknown" || panel.checkedAt !== null) changed = true;
+      panel.kind = "unknown";
+      panel.checkedAt = null;
+      panel.status = status;
+      panel.detail = detail;
     }
   }
 
@@ -268,12 +304,14 @@ chrome.runtime.onStartup.addListener(async () => {
   const state = await readState();
   await ensureAlarm(state);
   await restoreSavedMappings(true);
+  await updateActionIcon(await readState());
 });
 
 void (async () => {
   const state = await readState();
   await ensureAlarm(state);
   await restoreSavedMappings(true);
+  await updateActionIcon(await readState());
 })();
 
 chrome.alarms.onAlarm.addListener((alarm) => {
@@ -296,7 +334,7 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
   }
   let changed = false;
   for (const operation of Object.keys(PANEL_INFO)) {
-    if (state.mapping[operation] === tabId && state.mappingSession[operation] === sessionToken) {
+      if (state.mapping[operation] === tabId && state.mappingSession[operation] === sessionToken) {
       state.panels[operation].lastSelectedAt = Date.now();
       changed = true;
       if (state.running) {
@@ -348,6 +386,10 @@ async function handleMessage(message, sender) {
       if (!(operation in PANEL_INFO)) throw new Error("Operação inválida.");
       const tabId = message.tabId == null ? null : Number(message.tabId);
       if (tabId !== null && !Number.isInteger(tabId)) throw new Error("Aba inválida.");
+      const conflictingOperation = tabId === null
+        ? null
+        : Object.keys(PANEL_INFO).find((key) => key !== operation && state.mapping[key] === tabId);
+      if (conflictingOperation) throw new Error("Cada painel precisa usar uma aba diferente. Essa aba já está selecionada para outro painel.");
       const sessionToken = tabId === null ? null : await getBrowserSessionToken();
       let target = null;
       if (tabId !== null) {
@@ -384,13 +426,17 @@ async function handleMessage(message, sender) {
       await ensureAlarm(state);
       return { state };
     }
-    case "START":
+    case "START": {
+      const wasRunning = state.running;
       state.running = true;
+      if (!wasRunning) cycleVersion += 1;
       await writeState(state);
       await ensureAlarm(state);
-      await runCycle();
+      void runCycle();
       return { state: await readState() };
+    }
     case "STOP":
+      if (state.running) cycleVersion += 1;
       state.running = false;
       await writeState(state);
       await ensureAlarm(state);
@@ -402,32 +448,48 @@ async function handleMessage(message, sender) {
       await playAlertSound();
       await showNotification("Teste do alerta", "Se você ouviu o som, a saída de áudio está funcionando.", "test");
       return {};
+    case "GET_DOM_CHANGE_LOG":
+      return { log: await getDomChangeLog() };
     default:
       throw new Error("Ação desconhecida.");
   }
 }
 
 async function runCycle(onlyOperation = null) {
-  if (currentCycle) return currentCycle;
-  currentCycle = performCycle(onlyOperation);
+  if (currentCycle && currentCycleVersion === cycleVersion) return currentCycle;
+  if (currentCycle) {
+    try { await currentCycle; } catch { /* The previous cycle has already reported its failure. */ }
+  }
+  if (currentCycle && currentCycleVersion === cycleVersion) return currentCycle;
+
+  const runVersion = cycleVersion;
+  const cycle = performCycle(onlyOperation, runVersion);
+  currentCycle = cycle;
+  currentCycleVersion = runVersion;
   try {
-    await currentCycle;
+    await cycle;
+  } catch (error) {
+    console.error("Falha no ciclo do monitor de backlog:", error);
   } finally {
-    currentCycle = null;
+    if (currentCycle === cycle) currentCycle = null;
   }
 }
 
-async function performCycle(onlyOperation = null) {
+async function performCycle(onlyOperation = null, runVersion = cycleVersion) {
   await restoreSavedMappings();
+  if (runVersion !== cycleVersion) return;
   const state = await readState();
   if (!state.running) return;
   const checkedMapping = { ...state.mapping };
-  const operations = onlyOperation && onlyOperation in PANEL_INFO ? [onlyOperation] : ["aptiv", "brasilseg"];
+  const operations = onlyOperation && onlyOperation in PANEL_INFO ? [onlyOperation] : Object.keys(PANEL_INFO);
 
   for (const operation of operations) {
-    await checkOperation(operation, state);
+    if (runVersion !== cycleVersion) return;
+    await checkOperation(operation, state, runVersion);
   }
+  if (runVersion !== cycleVersion) return;
   const latestState = await readState();
+  if (runVersion !== cycleVersion) return;
   for (const operation of operations) {
     if (latestState.mapping[operation] === checkedMapping[operation]) {
       const latestPanel = latestState.panels[operation];
@@ -441,7 +503,7 @@ async function performCycle(onlyOperation = null) {
   await writeState(latestState);
 }
 
-async function checkOperation(operation, state) {
+async function checkOperation(operation, state, runVersion = cycleVersion) {
   const now = Date.now();
   const panel = state.panels[operation];
   const tabId = state.mapping[operation];
@@ -503,6 +565,7 @@ async function checkOperation(operation, state) {
     setPanelResult(panel, "unknown", "Falha de leitura", `O Chrome não conseguiu ler esta página: ${shortError(error)}.`);
     return;
   }
+  if (runVersion !== cycleVersion) return;
 
   const readings = (frames || []).map((frame) => frame.result).filter((result) => result && result.allowedHost);
   if (!readings.length) {
@@ -528,24 +591,36 @@ async function checkOperation(operation, state) {
   if (readings.every((reading) => reading.noReadableContent)) {
     const detail = operation === "brasilseg"
       ? "A aba não expôs texto legível. Isso não será interpretado como ausência de chamados."
+      : operation === "aptivPoland"
+        ? "A lista não expôs texto legível. Isso não será interpretado como uma lista sem chamados."
       : "A aba está em branco ou não expôs texto. O monitor tentará uma recuperação em segundo plano após o período seguro; se persistir, confira a própria aba do ServiceNow.";
     setPanelResult(panel, "unknown", "Página sem conteúdo legível", detail);
     if (!Number.isFinite(panel.lastSelectedAt) && !Number.isFinite(tab.lastAccessed)) panel.lastSelectedAt = now;
-    if (operation === "brasilseg") {
-      await maybeClickBrasilsegRefresh(tab, panel, now, lastInteraction, panel.lastSelectedAt, state.intervalMinutes);
-    } else {
-      await maybeRefreshAfterIdle(tab, panel, now, false, lastInteraction, panel.lastSelectedAt, true, state.intervalMinutes);
+    if (runVersion === cycleVersion) {
+      if (operation === "brasilseg") {
+        await maybeClickBrasilsegRefresh(tab, panel, now, lastInteraction, panel.lastSelectedAt, state.intervalMinutes);
+      } else {
+        await maybeRefreshAfterIdle(tab, panel, now, false, lastInteraction, panel.lastSelectedAt, true, state.intervalMinutes);
+      }
     }
     return;
   }
 
+  if (operation === "aptivPoland") {
+    await checkPolandOperation(tab, panel, state, now, readings, lastInteraction, runVersion);
+    return;
+  }
+
   const result = operation === "aptiv" ? combineAptiv(readings) : combineBrasilseg(readings);
+  if (runVersion !== cycleVersion) return;
   if (!result) {
     setPanelResult(panel, "unknown", "Falha de leitura", "O indicador esperado não foi encontrado no conteúdo acessível da página.");
-    if (operation === "brasilseg") {
-      await maybeClickBrasilsegRefresh(tab, panel, now, lastInteraction, panel.lastSelectedAt, state.intervalMinutes);
-    } else {
-      panel.freshness = "A recarga automática foi suspensa porque o indicador não pôde ser lido com confiança.";
+    if (runVersion === cycleVersion) {
+      if (operation === "brasilseg") {
+        await maybeClickBrasilsegRefresh(tab, panel, now, lastInteraction, panel.lastSelectedAt, state.intervalMinutes);
+      } else {
+        panel.freshness = "A recarga automática foi suspensa porque o indicador não pôde ser lido com confiança.";
+      }
     }
     return;
   }
@@ -570,21 +645,167 @@ async function checkOperation(operation, state) {
   }
 
   if (result.kind === "unknown") {
-    if (operation === "brasilseg") {
-      await maybeClickBrasilsegRefresh(tab, panel, now, lastInteraction, panel.lastSelectedAt, state.intervalMinutes);
-    } else {
-      panel.freshness = "A recarga automática foi suspensa porque a leitura ficou inconclusiva.";
+    if (runVersion === cycleVersion) {
+      if (operation === "brasilseg") {
+        await maybeClickBrasilsegRefresh(tab, panel, now, lastInteraction, panel.lastSelectedAt, state.intervalMinutes);
+      } else {
+        panel.freshness = "A recarga automática foi suspensa porque a leitura ficou inconclusiva.";
+      }
     }
   } else {
     if (!Number.isFinite(panel.lastSelectedAt) && !Number.isFinite(tab.lastAccessed)) {
       panel.lastSelectedAt = now;
     }
-    if (operation === "brasilseg") {
-      await maybeClickBrasilsegRefresh(tab, panel, now, lastInteraction, panel.lastSelectedAt, state.intervalMinutes);
-    } else {
-      await maybeRefreshAfterIdle(tab, panel, now, contentChanged, lastInteraction, panel.lastSelectedAt);
+    if (runVersion === cycleVersion) {
+      if (operation === "brasilseg") {
+        await maybeClickBrasilsegRefresh(tab, panel, now, lastInteraction, panel.lastSelectedAt, state.intervalMinutes);
+      } else {
+        await maybeRefreshAfterIdle(tab, panel, now, contentChanged, lastInteraction, panel.lastSelectedAt);
+      }
     }
   }
+}
+
+async function checkPolandOperation(tab, panel, state, now, readings, lastInteraction, runVersion = cycleVersion) {
+  const lists = readings.map((reading) => reading.polandList).filter(Boolean);
+  const visibleCallerIds = [...new Set(lists.flatMap((list) => list.sysIds || []))];
+  const listFound = lists.some((list) => list.found);
+  const listLoading = lists.some((list) => list.loading);
+  const emptyMessage = lists.some((list) => list.emptyMessage);
+  const visibleRows = Math.max(0, ...lists.map((list) => Number(list.rowCount) || 0));
+  const missingCallerRows = Math.max(0, ...lists.map((list) => Number(list.missingCallerRows) || 0));
+  let lookup = null;
+  if (listFound && visibleCallerIds.length) {
+    try {
+      const frames = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        world: "MAIN",
+        func: lookupPolandCallerOrigins,
+        args: [visibleCallerIds]
+      });
+      lookup = frames?.[0]?.result;
+    } catch (error) {
+      lookup = { status: "error", error: shortError(error) };
+    }
+
+    if (runVersion !== cycleVersion) return;
+  }
+  const result = MonitorRules.classifyPolandResult({
+    listFound,
+    visibleCallerIds,
+    visibleRows,
+    missingCallerRows,
+    listLoading,
+    emptyMessage,
+    lookup
+  });
+  if (runVersion !== cycleVersion) return;
+
+  const selectedState = await readState();
+  const activeSessionToken = await getBrowserSessionToken();
+  if (selectedState.mapping.aptivPoland !== tab.id || selectedState.mappingSession.aptivPoland !== activeSessionToken) return;
+
+  setPanelResult(panel, result.kind, result.status, result.detail);
+  const marker = readings.map((reading) => reading.refreshMarker).filter(Boolean).sort().join(" | ");
+  const fingerprint = JSON.stringify({ kind: result.kind, value: result.value ?? null, marker });
+  const contentChanged = Boolean(panel.fingerprint && panel.fingerprint !== fingerprint);
+  panel.fingerprint = fingerprint;
+  if (contentChanged) void detectDomChanges("aptivPoland", tab.id, readings);
+
+  if (result.kind === "backlog" && !panel.alertActive) {
+    panel.alertActive = true;
+    emitBacklogAlert("aptivPoland", result.detail);
+  } else if (result.kind === "empty") {
+    panel.alertActive = false;
+    chrome.notifications.clear("aptivPoland-backlog").catch(() => {});
+  }
+
+  if (result.kind === "unknown" && result.status === "Sessão expirada") {
+    panel.freshness = "Entre novamente na própria aba do ServiceNow para retomar a consulta.";
+    return;
+  }
+  if (runVersion !== cycleVersion) return;
+  if (!Number.isFinite(panel.lastSelectedAt) && !Number.isFinite(tab.lastAccessed)) panel.lastSelectedAt = now;
+  const [latestState, activity] = await Promise.all([readState(), chrome.storage.local.get(ACTIVITY_KEY)]);
+  if (runVersion !== cycleVersion) return;
+  if (latestState.mapping.aptivPoland !== tab.id || latestState.mappingSession.aptivPoland !== activeSessionToken) return;
+  let currentTab;
+  try {
+    currentTab = await chrome.tabs.get(tab.id);
+  } catch {
+    panel.freshness = "A aba foi fechada antes de poder ser atualizada.";
+    return;
+  }
+  const latestLastSelectedAt = Math.max(Number(panel.lastSelectedAt) || 0, Number(latestState.panels.aptivPoland.lastSelectedAt) || 0);
+  const latestInteraction = Math.max(Number(lastInteraction) || 0, Number(activity[ACTIVITY_KEY]?.aptivPoland) || 0);
+  await maybeRefreshAfterIdle(currentTab, panel, Date.now(), contentChanged, latestInteraction, latestLastSelectedAt, false, state.intervalMinutes);
+}
+
+async function lookupPolandCallerOrigins(sysIds) {
+  if (location.hostname.toLowerCase() !== "aptiv.service-now.com") return { status: "error" };
+  const validIds = [...new Set((Array.isArray(sysIds) ? sysIds : []).filter((id) => /^[a-f0-9]{32}$/i.test(String(id))))];
+  if (!validIds.length) return { status: "ok", matchCount: 0, failedCount: 0 };
+
+  const directoryMarkers = ["OU=BR", "OU=PT", "OU=BRAZIL", "OU=PORTUGAL"];
+  let matchCount = 0;
+  let failedCount = 0;
+  let sessionExpired = false;
+
+  async function checkOne(sysId) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
+    try {
+      const response = await fetch(`/sys_user.do?sys_id=${encodeURIComponent(sysId)}`, {
+        credentials: "same-origin",
+        redirect: "follow",
+        referrerPolicy: "origin",
+        signal: controller.signal,
+        headers: { Accept: "text/html" }
+      });
+      const finalUrl = new URL(response.url, location.href);
+      if (/login|signin|oauth|sso/i.test(finalUrl.pathname) || response.status === 401) {
+        return { status: "session-expired" };
+      }
+      if (!response.ok || finalUrl.hostname !== location.hostname || !/\/sys_user\.do$/i.test(finalUrl.pathname)) {
+        return { status: "error" };
+      }
+      const htmlText = await response.text();
+      const profile = new DOMParser().parseFromString(htmlText, "text/html");
+      const profileText = `${profile.title || ""} ${profile.body?.textContent || ""}`;
+      const expiredMessage = /session (has )?expired|sess[aã]o expirada|sess[aã]o expirou/i.test(profileText);
+      const loginForm = profile.querySelector('input[type="password"]') && /sign in|log in|login\.do|entrar|autentica[cç][aã]o/i.test(profileText);
+      if (expiredMessage || loginForm) {
+        return { status: "session-expired" };
+      }
+      const inputs = [...profile.querySelectorAll("input[value]")];
+      if (!inputs.length || /access denied|not authorized|permission denied|record not found|no record found|acesso negado|registro n[aã]o encontrado/i.test(profile.body?.textContent || "")) {
+        return { status: "error" };
+      }
+      const values = inputs.map((input) => String(input.value || input.getAttribute("value") || "").toUpperCase());
+      return {
+        status: "ok",
+        match: values.some((value) => directoryMarkers.some((marker) => value.includes(marker))),
+        hasDirectoryInfo: values.some((value) => value.includes("OU="))
+      };
+    } catch {
+      return { status: "error" };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  for (let index = 0; index < validIds.length; index += 4) {
+    const batch = await Promise.all(validIds.slice(index, index + 4).map(checkOne));
+    for (const result of batch) {
+      if (result.status === "session-expired") sessionExpired = true;
+      else if (result.status !== "ok") failedCount += 1;
+      else if (result.match) matchCount += 1;
+      else if (!result.hasDirectoryInfo) failedCount += 1;
+    }
+  }
+  return sessionExpired
+    ? { status: "session-expired", matchCount, failedCount }
+    : { status: "ok", matchCount, failedCount };
 }
 
 function setPanelResult(panel, kind, status, detail) {
@@ -668,7 +889,14 @@ async function maybeClickBrasilsegRefresh(tab, panel, now, lastInteraction, last
     } else if (result?.status === "ambiguous") {
       panel.freshness = "Encontrei mais de um botão de atualização possível no painel; não cliquei para evitar uma ação errada.";
     } else if (result?.status === "not-found") {
-      panel.freshness = "Não encontrei o botão de atualização do painel no DOM; não cliquei e não recarreguei a página.";
+      panel.freshness = "Não encontrei o botão de atualização; tentarei recarregar a página em segundo plano como alternativa.";
+      try {
+        await chrome.tabs.reload(tab.id);
+        panel.lastRefreshAt = now;
+        panel.freshness = "Botão não encontrado; recarga alternativa executada. A próxima verificação lerá a página atualizada.";
+      } catch (e) {
+        panel.freshness = "Botão não encontrado; recarga alternativa falhou. Verifique o painel manualmente.";
+      }
     } else if (result?.status === "disabled") {
       panel.freshness = "O botão de atualização do ServiceNow está desabilitado; tentarei novamente no próximo ciclo.";
     } else if (result?.status === "not-dashboard") {
@@ -738,7 +966,10 @@ function clickBrasilsegRefreshButton() {
       element.innerText,
       element.textContent
     ].map(normalize).filter(Boolean).join(" ");
-    return /\b(refresh|atualizar|atualizacao|recarregar|reload|update)\b/.test(names);
+    // Expanded refresh selector: broader term list to catch dashboard update buttons
+    const refreshTerms = ["refresh", "atualizar", "atualizacao", "recarregar", "reload", "update", "atualiza", "recarrega"];
+    const hasRefreshTerm = refreshTerms.some((t) => names.includes(t));
+    return hasRefreshTerm || /\b(refresh|atualizar|recarregar|atualiza)\b/.test(names);
   });
   const uniqueControls = controls.filter((element, index) => controls.indexOf(element) === index);
   if (!uniqueControls.length) return { status: "not-found" };
@@ -790,11 +1021,15 @@ function combineBrasilseg(readings) {
   return { kind: "unknown", status: "Leitura inconclusiva", detail: `${descriptions.join("; ")}. Confira o conteúdo da própria aba.`, sections };
 }
 
-function collectPanelFrame(operation) {
-  const expectedHost = operation === "aptiv" ? "aptiv.service-now.com" : "brasilseg.service-now.com";
+async function collectPanelFrame(operation) {
+  const expectedHost = operation === "brasilseg" ? "brasilseg.service-now.com" : "aptiv.service-now.com";
   const host = location.hostname.toLowerCase();
   const allowedHost = host === expectedHost;
   if (!allowedHost) return { allowedHost: false };
+
+  // Classic ServiceNow lists often populate their rows shortly after the page load.
+  // Match the delay used by the user's working console script before inspecting them.
+  if (operation === "aptivPoland") await new Promise((resolve) => setTimeout(resolve, 1500));
 
   const body = document.body;
   const bodyText = body ? readDeepText(body).slice(0, 30000) : "";
@@ -821,6 +1056,9 @@ function collectPanelFrame(operation) {
     base.lastInteraction = trackDashboardActivity();
   }
 
+  if (operation === "aptivPoland") {
+    return { ...base, polandList: findPolandList(body) };
+  }
   if (operation === "aptiv") {
     const value = findAptivValue(body);
     return { ...base, aptivValue: value };
@@ -1059,6 +1297,141 @@ function collectPanelFrame(operation) {
     });
   }
 
+  function findPolandList(root) {
+    const noDataPhrases = [
+      "no records to display", "no records found", "no record found",
+      "nenhum registro para exibir", "nenhum registro encontrado", "nenhum chamado encontrado",
+      "nao ha chamados", "nao ha registros"
+    ];
+    const ids = new Set();
+    let rowCount = 0;
+    let missingCallerRows = 0;
+    let emptyMessage = false;
+
+    // Use the same row and Caller-link selectors as the console script proven on this list.
+    const classicRows = [...root.querySelectorAll("tr.list_row")];
+    if (classicRows.length) {
+      for (const row of classicRows) {
+        rowCount += 1;
+        const callerLink = row.querySelector('a[data-table="sys_user"]') || row.querySelector('a[href*="sys_user"]');
+        if (!callerLink) {
+          missingCallerRows += 1;
+          continue;
+        }
+        const href = callerLink.getAttribute("href") || callerLink.href || "";
+        let sysId = "";
+        try {
+          const link = new URL(href, location.href);
+          if (link.origin === location.origin) sysId = link.searchParams.get("sys_id") || "";
+        } catch {
+          // Try the encoded link text below; unreadable IDs remain inconclusive.
+        }
+        if (!/^[a-f0-9]{32}$/i.test(sysId)) {
+          let decodedHref = href;
+          try { decodedHref = decodeURIComponent(href); } catch { /* Keep the original link text. */ }
+          sysId = decodedHref.match(/[?&]sys_id=([a-f0-9]{32})(?:&|$)/i)?.[1]
+            || decodedHref.match(/%3f[^#]*?sys_id%3d([a-f0-9]{32})(?:%26|$)/i)?.[1]
+            || "";
+        }
+        if (/^[a-f0-9]{32}$/i.test(sysId)) ids.add(sysId.toLowerCase());
+        else missingCallerRows += 1;
+      }
+      const tables = [...new Set(classicRows.map((row) => row.closest("table")).filter(Boolean))];
+      return {
+        found: true,
+        // A spinner elsewhere in the dashboard (or another list) is not proof
+        // that these already-readable Caller rows are incomplete.
+        loading: tables.some((table) => hasLoadingIndicator(table)),
+        rowCount,
+        missingCallerRows,
+        sysIds: [...ids],
+        emptyMessage
+      };
+    }
+
+    const elements = deepElements(root);
+    const rows = elements.filter((element) => element.localName === "tr" || element.getAttribute("role") === "row");
+    const listContainer = (row) => {
+      let current = row;
+      while (current && current !== root) {
+        const role = String(current.getAttribute?.("role") || "").toLowerCase();
+        if (current.localName === "table" || role === "grid" || role === "table") return current;
+        current = parentAcrossShadow(current);
+      }
+      return null;
+    };
+    const cellsForRow = (row) => {
+      const cells = [];
+      const walkCell = (node) => {
+        if (!node || node.nodeType !== 1) return;
+        const role = String(node.getAttribute("role") || "").toLowerCase();
+        if (["th", "td"].includes(node.localName) || ["columnheader", "cell", "gridcell"].includes(role)) {
+          cells.push(node);
+          return;
+        }
+        for (const child of composedChildren(node)) walkCell(child);
+      };
+      for (const child of composedChildren(row)) walkCell(child);
+      return cells;
+    };
+    const rowsByContainer = new Map();
+    for (const row of rows) {
+      const container = listContainer(row);
+      if (!container) continue;
+      if (!rowsByContainer.has(container)) rowsByContainer.set(container, []);
+      rowsByContainer.get(container).push(row);
+    }
+
+    let found = false;
+    let loading = false;
+
+    for (const [container, rowsInContainer] of rowsByContainer) {
+      const headerRows = rowsInContainer.map((row, rowIndex) => {
+        const cells = cellsForRow(row);
+        const callerIndex = cells.findIndex((cell) => textOf(cell).includes("caller"));
+        return callerIndex >= 0 ? { row, rowIndex, callerIndex } : null;
+      }).filter(Boolean);
+      if (!headerRows.length) continue;
+      found = true;
+      if (hasLoadingIndicator(container)) loading = true;
+      const containerText = normalize(readDeepText(container));
+      if (noDataPhrases.some((phrase) => containerText.includes(phrase))) emptyMessage = true;
+
+      const header = headerRows[0];
+      for (const row of rowsInContainer.slice(header.rowIndex + 1)) {
+        const cells = cellsForRow(row);
+        if (!cells.some((cell) => ["td", "cell", "gridcell"].includes(cell.localName) || ["cell", "gridcell"].includes(String(cell.getAttribute("role") || "").toLowerCase()))) continue;
+        const rowText = textOf(row);
+        if (!rowText) continue;
+        if (noDataPhrases.some((phrase) => rowText.includes(phrase))) continue;
+        rowCount += 1;
+        const callerCell = cells[header.callerIndex];
+        if (!callerCell) {
+          missingCallerRows += 1;
+          continue;
+        }
+        const anchors = [callerCell, ...deepElements(callerCell)].filter((element) => element.localName === "a");
+        const callerIds = [];
+        for (const anchor of anchors) {
+          try {
+            const href = anchor.getAttribute("href") || anchor.href || "";
+            const link = new URL(href, location.href);
+            if (link.origin !== location.origin || !/sys_user\.do/i.test(decodeURIComponent(link.pathname))) continue;
+            const decodedHref = decodeURIComponent(href);
+            const embeddedSysId = decodedHref.match(/[?&]sys_id=([a-f0-9]{32})(?:&|$)/i)?.[1] || "";
+            const sysId = link.searchParams.get("sys_id") || embeddedSysId;
+            if (/^[a-f0-9]{32}$/i.test(sysId)) callerIds.push(sysId.toLowerCase());
+          } catch {
+            // An unreadable caller link is handled as an incomplete row below.
+          }
+        }
+        if (!callerIds.length) missingCallerRows += 1;
+        else callerIds.forEach((sysId) => ids.add(sysId));
+      }
+    }
+    return { found, loading, rowCount, missingCallerRows, sysIds: [...ids], emptyMessage };
+  }
+
   function trackDashboardActivity() {
     const key = "__snBacklogMonitorLastInteraction";
     if (!Number.isFinite(globalThis[key])) {
@@ -1085,12 +1458,16 @@ function collectPanelFrame(operation) {
 }
 
 async function emitBacklogAlert(operation, detail) {
-  const title = operation === "aptiv"
-    ? "APTIV - Possível Chamado Backlog APTIV Brasil"
-    : "BRASILSEG - Possível Chamado Backlog BrasilSEG";
-  const message = operation === "aptiv"
+  const title = operation === "aptivPoland"
+    ? "APTIV - Possível Chamado Backlog APTIV Polônia"
+    : operation === "aptiv"
+      ? "APTIV - Possível Chamado Backlog APTIV Brasil"
+      : "BRASILSEG - Possível Chamado Backlog BrasilSEG";
+  const message = operation === "aptivPoland"
     ? detail
-    : "Confira as áreas Reação e Resolução no painel.";
+    : operation === "aptiv"
+      ? detail
+      : "Confira as áreas Reação e Resolução no painel.";
   await Promise.allSettled([
     playAlertSound(),
     showNotification(title, message, operation)
@@ -1135,4 +1512,28 @@ async function ensureOffscreenDocument() {
     }).finally(() => { creatingOffscreenDocument = null; });
   }
   await creatingOffscreenDocument;
+}
+
+async function detectDomChanges(operation, tabId, readings) {
+  // Check if the DOM structure has changed significantly since last check
+  // This helps alert when the ServiceNow UI changes and the extension may need updating
+  const state = await readState();
+  const panel = state.panels[operation];
+  const currentMarker = readings.map((r) => r.refreshMarker).filter(Boolean).join(" | ");
+  const currentFingerprint = panel.fingerprint;
+
+  if (currentFingerprint && currentMarker) {
+    const stored = await chrome.storage.local.get(DETECT_DOM_CHANGES_KEY);
+    const log = stored[DETECT_DOM_CHANGES_KEY] || {};
+    const key = `${operation}:${currentMarker}`;
+    if (!log[key]) {
+      log[key] = { firstSeen: Date.now(), panelFingerprint: currentFingerprint };
+      await chrome.storage.local.set({ [DETECT_DOM_CHANGES_KEY]: log });
+    }
+  }
+}
+
+async function getDomChangeLog() {
+  const stored = await chrome.storage.local.get(DETECT_DOM_CHANGES_KEY);
+  return stored[DETECT_DOM_CHANGES_KEY] || {};
 }

@@ -12,14 +12,21 @@
         <div class="brand-mark" aria-hidden="true">B</div>
         <div>
           <h1>Monitor de Backlog</h1>
-          <p>ServiceNow · APTIV e BRASILSEG</p>
+          <p>ServiceNow · APTIV, Polônia e BRASILSEG</p>
         </div>
+        <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Ativar modo escuro">☾ Modo escuro</button>
       </header>
 
       <section class="controls" aria-labelledby="monitor-title">
         <div class="section-heading">
-          <h2 id="monitor-title">Monitoramento</h2>
-          <span id="run-status" class="run-status">Parado</span>
+          <div>
+            <h2 id="monitor-title">Monitoramento</h2>
+            <span id="run-status" class="run-status">Inativa</span>
+          </div>
+          <div id="health-indicator" class="health-indicator" data-state="idle" role="status" aria-live="polite">
+            <span class="health-dot" aria-hidden="true"></span>
+            <span id="health-status">Em espera</span>
+          </div>
         </div>
         <label class="interval-label" for="interval">Intervalo entre verificações</label>
         <div class="interval-row">
@@ -27,16 +34,15 @@
           <span>minutos</span>
           <button id="save-interval" class="secondary-button" type="button">Aplicar</button>
         </div>
-        <p class="hint">Mínimo: 0,5 minuto (30 segundos). Após uma leitura confiável, a aba pode ser atualizada em segundo plano quando não houver interação observada por 2 minutos, mesmo que continue aberta. O Chrome pode atrasar os alarmes.</p>
+        <p class="hint">Mínimo de 30 segundos. APTIV e Polônia recarregam a página; BRASILSEG usa o botão interno. O Chrome pode atrasar as verificações.</p>
         <div class="button-row">
-          <button id="start" class="primary-button" type="button">Iniciar</button>
-          <button id="stop" class="secondary-button" type="button">Parar</button>
+          <button id="toggle-monitor" class="state-button state-button-start" type="button" aria-pressed="false">Iniciar verificação</button>
           <button id="test-sound" class="sound-button" type="button">Testar som</button>
         </div>
         <div id="feedback" class="feedback" role="status" aria-live="polite"></div>
       </section>
 
-      <section class="operation" aria-labelledby="aptiv-title">
+      <section class="operation" id="card-aptiv" aria-labelledby="aptiv-title">
         <div class="operation-heading">
           <span class="operation-dot aptiv-dot" aria-hidden="true"></span>
           <h2 id="aptiv-title">APTIV</h2>
@@ -46,14 +52,31 @@
           <option value="">Carregando abas…</option>
         </select>
         <div class="result-line">
-          <strong id="aptiv-state">Aguardando configuração</strong>
+          <strong id="aptiv-state" class="state-pill" data-kind="unknown">Aguardando configuração</strong>
           <span id="aptiv-time">Sem verificação</span>
         </div>
         <p id="aptiv-detail" class="detail">Selecione a aba que contém o painel APTIV.</p>
         <p id="aptiv-freshness" class="freshness"></p>
       </section>
 
-      <section class="operation" aria-labelledby="brasilseg-title">
+      <section class="operation" id="card-aptivPoland" aria-labelledby="aptivPoland-title">
+        <div class="operation-heading">
+          <span class="operation-dot poland-dot" aria-hidden="true"></span>
+          <h2 id="aptivPoland-title">APTIV Polônia · Brasil/Portugal</h2>
+        </div>
+        <label for="aptivPoland-tab">Aba da lista de chamados</label>
+        <select id="aptivPoland-tab">
+          <option value="">Carregando abas…</option>
+        </select>
+        <div class="result-line">
+          <strong id="aptivPoland-state" class="state-pill" data-kind="unknown">Aguardando configuração</strong>
+          <span id="aptivPoland-time">Sem verificação</span>
+        </div>
+        <p id="aptivPoland-detail" class="detail">Selecione a aba “Backlog APTIV Polônia”.</p>
+        <p id="aptivPoland-freshness" class="freshness"></p>
+      </section>
+
+      <section class="operation" id="card-brasilseg" aria-labelledby="brasilseg-title">
         <div class="operation-heading">
           <span class="operation-dot brasilseg-dot" aria-hidden="true"></span>
           <h2 id="brasilseg-title">BRASILSEG</h2>
@@ -63,7 +86,7 @@
           <option value="">Carregando abas…</option>
         </select>
         <div class="result-line">
-          <strong id="brasilseg-state">Aguardando configuração</strong>
+          <strong id="brasilseg-state" class="state-pill" data-kind="unknown">Aguardando configuração</strong>
           <span id="brasilseg-time">Sem verificação</span>
         </div>
         <p id="brasilseg-detail" class="detail">Selecione a aba que contém o painel BRASILSEG.</p>
@@ -75,6 +98,7 @@
         <span>Som e notificações seguem as configurações do Windows e do Chrome.</span>
       </footer>
     </main>
+    <script src="monitor-rules.js"></script>
     <script src="popup.js"></script>
   </body>
 </html>
