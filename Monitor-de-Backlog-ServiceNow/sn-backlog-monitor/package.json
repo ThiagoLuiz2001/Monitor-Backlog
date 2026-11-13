@@ -1,0 +1,27 @@
+{
+  "name": "sn-backlog-monitor",
+  "version": "2.5.0",
+  "description": "Monitor de backlog para ServiceNow - APTIV, Polônia e BRASILSEG",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/**/*.test.cjs",
+    "test:watch": "node --test --watch tests/**/*.test.cjs",
+    "zip": "node scripts/zip.js",
+    "lint": "eslint . --ext .js",
+    "lint:fix": "eslint . --ext .js --fix"
+  },
+  "keywords": [
+    "chrome-extension",
+    "servicenow",
+    "backlog",
+    "monitor"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "eslint": "^8.56.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
