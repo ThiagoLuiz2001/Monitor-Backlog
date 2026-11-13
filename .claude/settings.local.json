@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(powershell.exe -Command \"Compress-Archive -Path manifest.json, service-worker.js, monitor-rules.js, popup.html, popup.js, popup.css, offscreen.html, offscreen.js, icon.png, icons/ -DestinationPath dist/sn-backlog-monitor-v2.6.1.zip -Force\")",
+      "Bash(normalize)",
+      "Bash(collectPanelFrame)",
+      "Bash(powershell.exe -Command '& '\\\\''C:\\\\Program Files\\\\GitHub CLI\\\\gh.exe'\\\\'' release create v2.6.1 dist/sn-backlog-monitor-v2.6.1.zip --title '\\\\''v2.6.1'\\\\'' --notes '\\\\''### Release Notes v2.6.1 — 13/11/2026 *)"
+    ]
+  }
+}
