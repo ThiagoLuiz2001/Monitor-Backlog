@@ -24,7 +24,7 @@ function ensureDistDir() {
 
 function getFilesToInclude() {
   // Files and directories to include in the extension package
-  const includePatterns = [
+  const includeFiles = [
     "manifest.json",
     "service-worker.js",
     "monitor-rules.js",
@@ -34,28 +34,32 @@ function getFilesToInclude() {
     "offscreen.html",
     "offscreen.js",
     "icon.png",
-    "icons/**/*",
+  ];
+
+  const includeDirs = [
+    "icons",
   ];
 
   const files = [];
-  for (const pattern of includePatterns) {
-    const resolved = path.join(ROOT, pattern);
-    if (pattern.includes("**")) {
-      // Glob pattern
-      const dir = path.dirname(resolved);
-      const globPattern = path.basename(pattern);
-      const entries = fs.readdirSync(dir, { recursive: true });
+
+  // Add individual files
+  for (const file of includeFiles) {
+    const resolved = path.join(ROOT, file);
+    if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
+      files.push(file);
+    }
+  }
+
+  // Add all files from directories (recursive)
+  for (const dir of includeDirs) {
+    const resolvedDir = path.join(ROOT, dir);
+    if (fs.existsSync(resolvedDir) && fs.statSync(resolvedDir).isDirectory()) {
+      const entries = fs.readdirSync(resolvedDir, { recursive: true });
       for (const entry of entries) {
-        if (entry.endsWith(".png") || entry.endsWith(".html") || entry.endsWith(".js") || entry.endsWith(".css") || entry.endsWith(".json")) {
-          const fullPath = path.join(dir, entry);
-          if (fs.statSync(fullPath).isFile()) {
-            files.push(path.relative(ROOT, fullPath));
-          }
+        const fullPath = path.join(resolvedDir, entry);
+        if (fs.statSync(fullPath).isFile()) {
+          files.push(path.relative(ROOT, fullPath));
         }
-      }
-    } else if (fs.existsSync(resolved)) {
-      if (fs.statSync(resolved).isFile()) {
-        files.push(pattern);
       }
     }
   }

@@ -1098,6 +1098,15 @@ async function collectPanelFrame(operation) {
   }
   return { ...base, sections: [findBrasilSection(body, "Reação"), findBrasilSection(body, "Resolução")] };
 
+    function normalize(value) {
+      return String(value || "")
+        .normalize("NFD")
+        .replace(/[̀-ͯ]/g, "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLowerCase();
+    }
+
     function isVisible(element) {
     if (!element || !element.isConnected) return false;
     const style = getComputedStyle(element);

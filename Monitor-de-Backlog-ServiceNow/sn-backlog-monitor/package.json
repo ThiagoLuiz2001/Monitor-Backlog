@@ -1,6 +1,6 @@
 {
   "name": "sn-backlog-monitor",
-  "version": "2.6.0",
+  "version": "2.6.1",
   "description": "Monitor de backlog para ServiceNow - APTIV, Polônia e BRASILSEG",
   "private": true,
   "scripts": {
