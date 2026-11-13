@@ -6,10 +6,10 @@ const zlib = require("node:zlib");
 
 const root = path.join(__dirname, "..");
 
-test("the Manifest V3 package is version 2.5.0 and keeps the existing narrow permissions", () => {
+test("the Manifest V3 package is version 2.6.0 and keeps the existing narrow permissions", () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(root, "manifest.json"), "utf8"));
   assert.equal(manifest.manifest_version, 3);
-  assert.equal(manifest.version, "2.5.0");
+  assert.equal(manifest.version, "2.6.0");
   assert.deepEqual(manifest.host_permissions, [
     "https://aptiv.service-now.com/*",
     "https://brasilseg.service-now.com/*"
