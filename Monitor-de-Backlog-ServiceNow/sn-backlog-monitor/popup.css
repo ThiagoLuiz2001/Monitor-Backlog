@@ -1,3 +1,11 @@
+:root {
+  color-scheme: light;
+  font-family: "Segoe UI", Arial, sans-serif;
+  color: #17212b;
+  background: #f4f7f9;
+  font-synthesis: none;
+}
+
 * { box-sizing: border-box; }
 
 body {

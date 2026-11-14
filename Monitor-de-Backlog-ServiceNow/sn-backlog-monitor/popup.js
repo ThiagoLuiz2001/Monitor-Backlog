@@ -19,7 +19,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   byId("test-sound").addEventListener("click", () => sendAction("TEST_SOUND"));
   byId("save-interval").addEventListener("click", saveInterval);
   byId("refresh-tabs").addEventListener("click", loadTabs);
-  byId("check-now").addEventListener("click", checkNow);
 
   for (const operation of Object.keys(OPERATION_LABELS)) {
     byId(`${operation}-tab`).addEventListener("change", (event) => {
@@ -35,17 +34,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   }
 
-  // Listen for storage changes to re-render without polling
-  chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === "local" && changes.monitorState) {
-      void renderState();
-    }
-  });
-
   await initializeTheme();
   await loadTabs();
   await renderState();
   await loadDomChangeLog();
+  window.setInterval(renderState, 1500);
 });
 
 async function initializeTheme() {
@@ -170,19 +163,7 @@ async function sendAction(type) {
   else if (type === "START") setFeedback("Verificação iniciada.", "success");
   else if (type === "STOP") setFeedback("Verificação desativada.", "success");
   else if (type === "TEST_SOUND") setFeedback("Teste enviado. O som e a notificação dependem das configurações do Chrome e do Windows.", "success");
-  else if (type === "CHECK_NOW") setFeedback("Verificação forçada iniciada.", "success");
   await renderState();
-}
-
-async function checkNow() {
-  const button = byId("check-now");
-  button.disabled = true;
-  setFeedback("");
-  try {
-    await sendAction("CHECK_NOW");
-  } finally {
-    button.disabled = false;
-  }
 }
 
 async function sendMessage(message) {

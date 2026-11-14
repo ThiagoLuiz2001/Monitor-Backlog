@@ -5,22 +5,8 @@ const ACTIVITY_KEY = "panelInteractionTimes";
 const ALARM_NAME = "service-now-backlog-check";
 const RECHECK_ALARM_PREFIX = "service-now-foreground-recheck-";
 const SESSION_TOKEN_KEY = "monitorBrowserSessionToken";
-
-// Configuration thresholds - centralized for easy tuning
-const THRESHOLDS = {
-  RECENT_USE_MS: 2 * 60 * 1000,
-  MIN_INTERVAL_MS: 0.5 * 60 * 1000,
-  RECOVERY_COOLDOWN_MS: 5 * 60 * 1000,
-  POLAND_LOOKUP_BATCH_SIZE: 4,
-  POLAND_LOOKUP_TIMEOUT_MS: 15000,
-  POLAND_INITIAL_DELAY_MS: 1500,
-  DOM_CHANGE_TTL_MS: 24 * 60 * 60 * 1000,
-  SHORT_ERROR_MAX_LENGTH: 300,
-  BODY_TEXT_MAX_LENGTH: 100000,
-};
-
-const MIN_INTERVAL_MINUTES = THRESHOLDS.MIN_INTERVAL_MS / 60000;
-const RECENT_USE_MS = THRESHOLDS.RECENT_USE_MS;
+const MIN_INTERVAL_MINUTES = 0.5;
+const RECENT_USE_MS = 2 * 60 * 1000;
 
 const PANEL_INFO = {
   aptiv: { label: "APTIV", host: "aptiv.service-now.com" },
@@ -37,7 +23,6 @@ let restoringMappings;
 let lastRestoreScanAt = 0;
 
 const DETECT_DOM_CHANGES_KEY = "monitorDomChangeLog";
-
 const ACTION_ICONS = {
   idle: { 16: "icons/status/idle16.png", 32: "icons/status/idle32.png" },
   error: { 16: "icons/status/error16.png", 32: "icons/status/error32.png" },
@@ -151,17 +136,8 @@ function tabIdentity(tab) {
   }
 }
 
-function normalize(value) {
-  return String(value || "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
-}
-
 function normalizeTitle(title) {
-  return normalize(title);
+  return String(title || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
 }
 
 function isExpectedPanelTitle(operation, title) {
@@ -198,16 +174,7 @@ function matchSavedTarget(operation, target, tabs) {
 async function restoreSavedMappings(force = false) {
   if (restoringMappings) return restoringMappings;
   if (!force && Date.now() - lastRestoreScanAt < 5000) return readState();
-
-  restoringMappings = (async () => {
-    try {
-      return await performMappingRestore();
-    } finally {
-      restoringMappings = null;
-      lastRestoreScanAt = Date.now();
-    }
-  })();
-
+  restoringMappings = performMappingRestore().finally(() => { restoringMappings = null; });
   return restoringMappings;
 }
 
@@ -786,7 +753,7 @@ async function lookupPolandCallerOrigins(sysIds) {
 
   async function checkOne(sysId) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), THRESHOLDS.POLAND_LOOKUP_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), 15000);
     try {
       const response = await fetch(`/sys_user.do?sys_id=${encodeURIComponent(sysId)}`, {
         credentials: "same-origin",
@@ -848,7 +815,7 @@ function setPanelResult(panel, kind, status, detail) {
 }
 
 function shortError(error) {
-  return String(error?.message || error || "erro desconhecido").replace(/\s+/g, " ").slice(0, THRESHOLDS.SHORT_ERROR_MAX_LENGTH);
+  return String(error?.message || error || "erro desconhecido").replace(/\s+/g, " ").slice(0, 130);
 }
 
 async function maybeRefreshAfterIdle(tab, panel, now, contentChanged, lastInteraction, lastSelectedAt, recovery = false, intervalMinutes = 1) {
@@ -867,7 +834,7 @@ async function maybeRefreshAfterIdle(tab, panel, now, contentChanged, lastIntera
     panel.freshness = `Recarga adiada porque ${reason}; nova tentativa no próximo ciclo. A aba pode continuar aberta: sem interação recente, ela poderá ser atualizada em segundo plano.${contentChanged ? " O conteúdo visível mudou desde a última verificação." : ""}`;
     return;
   }
-  const recoveryCooldownMs = Math.max(THRESHOLDS.RECOVERY_COOLDOWN_MS, (Number(intervalMinutes) || 1) * 60 * 1000);
+  const recoveryCooldownMs = Math.max(5 * 60 * 1000, (Number(intervalMinutes) || 1) * 60 * 1000);
   if (recovery && Number(panel.lastRefreshAt) > 0 && now - Number(panel.lastRefreshAt) < recoveryCooldownMs) {
     const waitMinutes = Math.max(1, Math.ceil((recoveryCooldownMs - (now - Number(panel.lastRefreshAt))) / 60000));
     panel.freshness = `A página segue sem conteúdo legível. A próxima tentativa de recuperação será em cerca de ${waitMinutes} min.`;
@@ -902,7 +869,7 @@ async function maybeClickBrasilsegRefresh(tab, panel, now, lastInteraction, last
     return;
   }
 
-  const minClickIntervalMs = Math.max(THRESHOLDS.MIN_INTERVAL_MS, (Number(intervalMinutes) || 1) * 60 * 1000);
+  const minClickIntervalMs = Math.max(MIN_INTERVAL_MINUTES * 60 * 1000, (Number(intervalMinutes) || 1) * 60 * 1000);
   const elapsedSinceRefresh = now - (Number(panel.lastRefreshAt) || 0);
   if (panel.lastRefreshAt && elapsedSinceRefresh < minClickIntervalMs) {
     const waitSeconds = Math.max(1, Math.ceil((minClickIntervalMs - elapsedSinceRefresh) / 1000));
@@ -1062,10 +1029,10 @@ async function collectPanelFrame(operation) {
 
   // Classic ServiceNow lists often populate their rows shortly after the page load.
   // Match the delay used by the user's working console script before inspecting them.
-  if (operation === "aptivPoland") await new Promise((resolve) => setTimeout(resolve, THRESHOLDS.POLAND_INITIAL_DELAY_MS));
+  if (operation === "aptivPoland") await new Promise((resolve) => setTimeout(resolve, 1500));
 
   const body = document.body;
-  const bodyText = body ? readDeepText(body).slice(0, THRESHOLDS.BODY_TEXT_MAX_LENGTH) : "";
+  const bodyText = body ? readDeepText(body).slice(0, 30000) : "";
   const title = document.title || "";
   const pageText = `${location.href} ${title} ${bodyText.slice(0, 5000)}`;
   const normalizedText = normalize(pageText);
@@ -1098,16 +1065,16 @@ async function collectPanelFrame(operation) {
   }
   return { ...base, sections: [findBrasilSection(body, "Reação"), findBrasilSection(body, "Resolução")] };
 
-    function normalize(value) {
-      return String(value || "")
-        .normalize("NFD")
-        .replace(/[̀-ͯ]/g, "")
-        .replace(/\s+/g, " ")
-        .trim()
-        .toLowerCase();
-    }
+  function normalize(value) {
+    return String(value || "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLowerCase();
+  }
 
-    function isVisible(element) {
+  function isVisible(element) {
     if (!element || !element.isConnected) return false;
     const style = getComputedStyle(element);
     return !element.hidden && style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
@@ -1558,22 +1525,11 @@ async function detectDomChanges(operation, tabId, readings) {
   if (currentFingerprint && currentMarker) {
     const stored = await chrome.storage.local.get(DETECT_DOM_CHANGES_KEY);
     const log = stored[DETECT_DOM_CHANGES_KEY] || {};
-    // Use fingerprint (includes kind, value, sections, marker) to avoid collisions between panels
-    const key = `${operation}:${currentFingerprint}`;
+    const key = `${operation}:${currentMarker}`;
     if (!log[key]) {
       log[key] = { firstSeen: Date.now(), panelFingerprint: currentFingerprint };
       await chrome.storage.local.set({ [DETECT_DOM_CHANGES_KEY]: log });
     }
-    // Clean up old entries beyond TTL
-    const now = Date.now();
-    let cleaned = false;
-    for (const [k, v] of Object.entries(log)) {
-      if (now - (v?.firstSeen || 0) > THRESHOLDS.DOM_CHANGE_TTL_MS) {
-        delete log[k];
-        cleaned = true;
-      }
-    }
-    if (cleaned) await chrome.storage.local.set({ [DETECT_DOM_CHANGES_KEY]: log });
   }
 }
 

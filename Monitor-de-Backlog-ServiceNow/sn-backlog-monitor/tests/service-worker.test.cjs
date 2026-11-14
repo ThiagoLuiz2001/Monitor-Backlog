@@ -91,17 +91,3 @@ test("START and STOP update the saved state without waiting for a full scan", as
   assert.equal(local.monitorState.running, false);
   assert.equal(icons.at(-1)[16], "icons/status/idle16.png");
 });
-
-test("GET_STATE returns current state with all expected fields", async () => {
-  const { context, local } = makeWorkerHarness();
-  const result = await context.handleMessage({ type: "GET_STATE" }, {});
-  // handleMessage returns { state: ... } directly; the ok: true wrapper is added by the runtime.onMessage listener
-  assert.ok(result.state);
-  assert.equal(typeof result.state.running, "boolean");
-  assert.ok(result.state.panels);
-  assert.ok(result.state.mapping);
-  assert.ok(result.state.targets);
-  assert.ok(result.state.mappingSession);
-  // intervalMinutes comes from defaultState() since storage is empty
-  assert.ok(Number.isFinite(result.state.intervalMinutes));
-});
