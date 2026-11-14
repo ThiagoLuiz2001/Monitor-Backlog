@@ -1101,7 +1101,8 @@ async function collectPanelFrame(operation) {
     function normalize(value) {
       return String(value || "")
         .normalize("NFD")
-        .replace(/[̀-ͯ]/g, "")       .replace(/s+/g, " ")
+        .replace(/[̀-ͯ]/g, "")
+        .replace(/\s+/g, " ")
         .trim()
         .toLowerCase();
     }
