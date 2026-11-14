@@ -123,7 +123,11 @@ async function handleMessage(message, sender) {
       await ensureAlarm(state);
       return { state };
     case "CHECK_NOW":
-      await runCycle();
+      // Verificação manual sempre executa um ciclo novo, mesmo com o monitor
+      // desativado; invalida um ciclo automático em andamento para não ficar
+      // na fila atrás dele.
+      await bumpCycleVersion();
+      await runCycle(null, true);
       return { state: await readState() };
     case "TEST_SOUND":
       await playAlertSound();

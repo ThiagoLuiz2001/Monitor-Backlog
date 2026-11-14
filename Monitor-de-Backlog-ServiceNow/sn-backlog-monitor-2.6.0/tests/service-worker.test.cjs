@@ -141,3 +141,27 @@ test("poland lookup cache partitions cached and missing ids and aggregates resul
   assert.equal(agg.status, "ok");
   assert.equal(agg.matchCount, 2);
 });
+
+test("CHECK_NOW runs a cycle even when the monitor is stopped", async () => {
+  const { context } = makeWorkerHarness();
+  await context.handleMessage({ type: "STOP" }, {});
+  const before = await context.handleMessage({ type: "GET_STATE" }, {});
+  assert.equal(before.state.panels.aptiv.checkedAt, null);
+  await new Promise((r) => setTimeout(r, 20));
+  await context.handleMessage({ type: "CHECK_NOW" }, {});
+  const after = await context.handleMessage({ type: "GET_STATE" }, {});
+  assert.ok(Number(after.state.panels.aptiv.checkedAt) > 0, "checkedAt deve ser atualizado com o monitor parado");
+  assert.equal(after.state.running, false, "CHECK_NOW não deve ligar o monitor automático");
+});
+
+test("CHECK_NOW runs a fresh cycle while the monitor is running", async () => {
+  const { context } = makeWorkerHarness();
+  await context.handleMessage({ type: "START" }, {});
+  const mid = await context.handleMessage({ type: "GET_STATE" }, {});
+  const first = Number(mid.state.panels.aptiv.checkedAt) || 0;
+  await new Promise((r) => setTimeout(r, 20));
+  await context.handleMessage({ type: "CHECK_NOW" }, {});
+  const after = await context.handleMessage({ type: "GET_STATE" }, {});
+  assert.ok(Number(after.state.panels.aptiv.checkedAt) > first, "checkedAt deve avançar com o monitor ativo");
+  assert.equal(after.state.running, true);
+});

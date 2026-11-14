@@ -71,15 +71,15 @@ function aggregatePolandLookup(lookup, cachedResults) {
   return { status: "ok", matchCount, failedCount };
 }
 
-async function runCycle(onlyOperation = null) {
-  if (currentCycle && currentCycleVersion === cycleVersion) return currentCycle;
+async function runCycle(onlyOperation = null, force = false) {
+  if (!force && currentCycle && currentCycleVersion === cycleVersion) return currentCycle;
   if (currentCycle) {
     try { await currentCycle; } catch { /* The previous cycle has already reported its failure. */ }
   }
-  if (currentCycle && currentCycleVersion === cycleVersion) return currentCycle;
+  if (!force && currentCycle && currentCycleVersion === cycleVersion) return currentCycle;
 
   const runVersion = cycleVersion;
-  const cycle = performCycle(onlyOperation, runVersion);
+  const cycle = performCycle(onlyOperation, runVersion, force);
   currentCycle = cycle;
   currentCycleVersion = runVersion;
   try {
@@ -91,11 +91,11 @@ async function runCycle(onlyOperation = null) {
   }
 }
 
-async function performCycle(onlyOperation = null, runVersion = cycleVersion) {
+async function performCycle(onlyOperation = null, runVersion = cycleVersion, force = false) {
   await restoreSavedMappings();
   if (runVersion !== cycleVersion) return;
   const state = await readState();
-  if (!state.running) return;
+  if (!state.running && !force) return;
   const checkedMapping = { ...state.mapping };
   const operations = onlyOperation && onlyOperation in PANEL_INFO ? [onlyOperation] : Object.keys(PANEL_INFO);
 
