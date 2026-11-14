@@ -13,6 +13,7 @@
  *   messages.js  — protocolo de mensagens com validação de esquema
  */
 importScripts(
+  "monitor-rules.js",
   "src/state.js",
   "src/mappings.js",
   "src/scraping.js",

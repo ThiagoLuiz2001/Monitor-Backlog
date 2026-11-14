@@ -57,7 +57,7 @@ function makeWorkerHarness() {
   };
   const context = vm.createContext({ chrome, crypto: { randomUUID: () => "test-session" }, console });
   context.importScripts = (...files) => {
-    context.MonitorRules = MonitorRules;
+    // Carrega os arquivos reais (monitor-rules.js primeiro), como o worker faz.
     for (const file of files) {
       const source = fs.readFileSync(path.join(__dirname, "..", file), "utf8");
       vm.runInContext(source, context, { filename: file });
